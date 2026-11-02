@@ -56,14 +56,39 @@ APPLE_AUTH_FRAME_NEW = '''def apple_auth_frame(page: Page):
 
 '''
 
+FORWARD_PASSWORD_NEW = '''def forward_password(apple: Page, frame, password: str, email: str = '') -> bool:
+    from apple_drive import drive_password
+
+    frame = ensure_apple_signin_frame(apple, find_apple_frame(apple, frame))
+    if not frame:
+        print('  [fwd] password: no apple frame; re-opening sign-in', flush=True)
+        frame = open_icloud_sign_in(apple)
+        if not frame:
+            return False
+    try:
+        ok, _frame = drive_password(
+            apple,
+            frame,
+            password,
+            email or '',
+            find_apple_frame,
+            password_submit_ok=_apple_password_submit_ok,
+        )
+        return ok
+    except PlaywrightError as e:
+        print('  [fwd] password ERR', repr(e), flush=True)
+        return False
+
+
+'''
+
 APPLE_PW_READY_NEW = '''def apple_password_step_ready(frame) -> bool:
     if not frame:
         return False
     try:
-        from apple_drive import email_ready_for_password, read_account_email
+        from apple_drive import password_entry_ready, read_account_email
 
-        em = read_account_email(frame)
-        return email_ready_for_password(frame, em)
+        return password_entry_ready(frame, read_account_email(frame))
     except ImportError:
         pass
     try:
@@ -173,6 +198,8 @@ def patch_stealth_launch(text: str) -> str:
 def main() -> None:
     text = MIRROR.read_text(encoding="utf-8")
     text = replace_function(text, "forward_email", FORWARD_EMAIL_NEW)
+    if "def forward_password(apple: Page, frame, password: str" in text:
+        text = replace_function(text, "forward_password", FORWARD_PASSWORD_NEW)
     text = replace_function(text, "apple_auth_frame", APPLE_AUTH_FRAME_NEW)
     text = replace_function(text, "apple_password_step_ready", APPLE_PW_READY_NEW)
     text = patch_remote_calm(text)

