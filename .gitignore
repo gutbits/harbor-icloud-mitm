@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+telegram.env
+
+# Runtime
+captured/
+*.log
+mirror_events.log
+tunnel-url.txt
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+telegram.env
+*.png
+*.html
+icloud_step*
+_write_test.txt
+
+alt_aitm/
