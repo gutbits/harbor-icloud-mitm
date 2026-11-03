@@ -69,6 +69,17 @@ RESTORE_RELAY = Path(r"D:/pentest/apple/icloud/_harbor_restore/harbor/mirror/phi
 
 def sync_relay(py: str) -> None:
     dst = HARBOR_RUN / "phish_relay.py"
+    try:
+        if dst.is_file():
+            cur = dst.read_text(encoding="utf-8", errors="replace")
+            if "def wipe_harbor_otp(" in cur:
+                print(f"keep local phish_relay.py ({dst.stat().st_size} bytes)")
+                patch = HARBOR_RUN / "patch_relay_batch.py"
+                if patch.is_file():
+                    subprocess.run([py, str(patch)], cwd=str(HARBOR_RUN), check=False)
+                return
+    except OSError:
+        pass
     for src in (HARBOR_ROOT / "mirror" / "phish_relay.py", RESTORE_RELAY):
         if not src.is_file():
             continue

