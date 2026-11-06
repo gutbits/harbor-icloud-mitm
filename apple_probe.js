@@ -81,11 +81,17 @@
   let paymentCopy = null;
   let pageCopy = null;
 
-  if (/verify your payment information/i.test(bodyText)) {
+  if (
+    /verify your payment information/i.test(bodyText) ||
+    /security code for the(?: credit)? card/i.test(bodyText)
+  ) {
     pageKind = 'payment';
     const title =
-      lines.find((l) => /verify your payment information/i.test(l)) ||
-      'Verify your payment information';
+      lines.find(
+        (l) =>
+          /verify your payment information/i.test(l) ||
+          /security code for the(?: credit)? card/i.test(l)
+      ) || 'Verify your payment information';
     const lede =
       lines.find((l) =>
         /app store|apple music|security code|not be charged|payment method/i.test(l)

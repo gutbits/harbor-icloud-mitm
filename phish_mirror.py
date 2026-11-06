@@ -1423,7 +1423,13 @@ def apple_ui_ready(
     if st.get('loading'):
         return False
     if st.get('step') == 'payment' or st.get('pageKind') == 'payment' or surf.get('payment'):
-        return bool(st.get('paymentCopy') or surf.get('payment'))
+        # idmsa sometimes omits structured paymentCopy; surface probe or step alone is enough.
+        return bool(
+            st.get('paymentCopy')
+            or surf.get('payment')
+            or st.get('step') == 'payment'
+            or st.get('pageKind') == 'payment'
+        )
     if st.get('step') == 'otp' or apple_otp_step_ready(frame):
         return bool(st.get('verifyCopy') or apple_otp_step_ready(frame))
     if st.get('step') == 'password':
